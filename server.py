@@ -1,11 +1,7 @@
 from mcp.server.fastmcp import FastMCP
 from groq import Groq
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.common.by import By
+import httpx
 from bs4 import BeautifulSoup
-import time
 import os
 from dotenv import load_dotenv
 
@@ -13,46 +9,39 @@ load_dotenv()
 client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 mcp = FastMCP("web-agent", stateless_http=True, host="0.0.0.0")
 
-def create_browser():
-    options = webdriver.ChromeOptions()
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("--headless")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=options
-    )
-    return driver
+async def search_web(query):
+    url = f"https://duckduckgo.com/html/?q={query.replace(' ', '+')}"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client_http:
+        r = await client_http.get(url, headers=headers)
+        soup = BeautifulSoup(r.text, "html.parser")
+        results = []
+        for result in soup.find_all("div", class_="result")[:5]:
+            title_tag = result.find("a", class_="result__a")
+            snippet_tag = result.find("a", class_="result__snippet")
+            if title_tag:
+                results.append({
+                    "title": title_tag.get_text(),
+                    "snippet": snippet_tag.get_text() if snippet_tag else "",
+                    "url": title_tag.get("href", "")
+                })
+        return results
 
-def search_web(driver, query):
-    driver.get(f"https://duckduckgo.com/?q={query.replace(' ', '+')}")
-    time.sleep(3)
-
-def get_search_results(driver):
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    results = []
-    for a in soup.find_all("a", attrs={"data-testid": "result-title-a"})[:5]:
-        href = a.get("href")
-        title = a.get_text()
-        if href and title:
-            results.append({"title": title, "url": href})
-    return results
-
-def get_page_text(driver, url):
-    driver.get(url)
-    time.sleep(2)
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    for tag in soup(["script", "style", "nav", "footer"]):
-        tag.decompose()
-    text = soup.get_text(separator=" ", strip=True)
-    return text[:3000]
+async def fetch_page(url):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client_http:
+        r = await client_http.get(url, headers=headers)
+        soup = BeautifulSoup(r.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer"]):
+            tag.decompose()
+        return soup.get_text(separator=" ", strip=True)[:3000]
 
 def think(task, context):
     response = client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=[
-            {"role": "system", "content": "You are an autonomous web agent. Given a task and context from web pages, provide a comprehensive answer."},
-            {"role": "user", "content": f"Task: {task}\n\nContext from web:\n{context}\n\nProvide your answer:"}
+            {"role": "system", "content": "You are an autonomous web agent. Answer the task using the web context provided."},
+            {"role": "user", "content": f"Task: {task}\n\nWeb context:\n{context}\n\nAnswer:"}
         ]
     )
     return response.choices[0].message.content
@@ -60,22 +49,20 @@ def think(task, context):
 @mcp.tool()
 async def search_and_answer(query: str) -> str:
     """Search the web and answer any question using real-time information."""
-    driver = create_browser()
-    try:
-        search_web(driver, query)
-        results = get_search_results(driver)
-        if not results:
-            return "No results found."
-        all_content = ""
-        for i, result in enumerate(results[:3]):
-            try:
-                content = get_page_text(driver, result["url"])
-                all_content += f"\n\nSource {i+1}: {result['title']}\n{content}"
-            except:
-                continue
-        return think(query, all_content)
-    finally:
-        driver.quit()
+    results = await search_web(query)
+    if not results:
+        return "No results found."
+
+    context = ""
+    for i, r in enumerate(results[:3]):
+        context += f"\nSource {i+1}: {r['title']}\n{r['snippet']}\n"
+        try:
+            page = await fetch_page(r['url'])
+            context += page
+        except:
+            pass
+
+    return think(query, context)
 
 app = mcp.streamable_http_app()
 
