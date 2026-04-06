@@ -49,21 +49,23 @@ def think(task, context):
 @mcp.tool()
 async def search_and_answer(query: str) -> str:
     """Search the web and answer any question using real-time information."""
-    results = await search_web(query)
-    if not results:
-        return "No results found."
-
-    context = ""
-    for i, r in enumerate(results[:3]):
-        context += f"\nSource {i+1}: {r['title']}\n{r['snippet']}\n"
-        try:
-            page = await fetch_page(r['url'])
-            context += page
-        except:
-            pass
-
-    return think(query, context)
-
+    try:
+        results = await search_web(query)
+        if not results:
+            return "No search results found for: " + query
+        
+        context = ""
+        for i, r in enumerate(results[:3]):
+            context += f"\nSource {i+1}: {r['title']}\n{r['snippet']}\n"
+            try:
+                page = await fetch_page(r['url'])
+                context += page
+            except Exception as e:
+                context += f"Could not fetch page: {str(e)}\n"
+        
+        return think(query, context)
+    except Exception as e:
+        return f"Error: {str(e)}"
 app = mcp.streamable_http_app()
 
 if __name__ == "__main__":
